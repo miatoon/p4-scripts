@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION='0.0.1'
+VERSION='0.0.2'
 
 # Execute this script with 'bash -x SCRIPT' to activate debugging
 if [ ${-/*x*/x} == 'x' ]; then
@@ -95,19 +95,21 @@ function _main() {
 
     local client_name=$1
     local delete_output=$(p4_client_delete "${client_name}")
-    detect_client_deletion_success is_deleted <<< "${delete_ouput}"
-    if [ $is_deleted -eq 0 ]; then
-        detect_pending_changes has_pending <<< "${delete_ouput}"
-        detect_opened_files has_opened_files <<< "${delete_ouput}"
+    detect_client_deletion_success is_deleted <<< "${delete_output}"
+    if [ $is_deleted -gt 0 ]; then
+        echo "${delete_output}" | echo_color ${COLOR_GREEN}
+    else
+        detect_pending_changes has_pending <<< "${delete_output}"
+        detect_opened_files has_opened_files <<< "${delete_output}"
         if [ $has_pending -ge 1 ]; then
             echo "The client ${client_name} has pending changelist(s)" | echo_color ${COLOR_CYAN}
             $OPT_DELETE_PENDING_CL && delete_pending_changelists are_all_changelists_deleted "${client_name}"
             if [ ${are_all_changelists_deleted} ]; then
                 # Try again to delete the client
                 delete_output=$(p4_client_delete "${client_name}")
-                detect_client_deletion_success is_deleted <<< "${delete_ouput}"
+                detect_client_deletion_success is_deleted <<< "${delete_output}"
                 if [ $is_deleted -eq 0 ]; then
-                    echo "Unabled to delete the client \"${client_name}\" even after its pending CLs have been deleted!" | echo_color ${COLOR_RED}
+                    echo "Unable to delete the client \"${client_name}\" even after its pending CLs have been deleted!" | echo_color ${COLOR_RED}
                 fi
             fi
         fi
@@ -117,9 +119,9 @@ function _main() {
             if [ ${are_all_files_reverted} ]; then
                 # Try again to delete the client
                 delete_output=$(p4_client_delete "${client_name}")
-                detect_client_deletion_success is_deleted <<< "${delete_ouput}"
+                detect_client_deletion_success is_deleted <<< "${delete_output}"
                 if [ $is_deleted -eq 0 ]; then
-                    echo "Unabled to delete the client \"${client_name}\" even after its opened files have been reverted!" | echo_color ${COLOR_RED}
+                    echo "Unable to delete the client \"${client_name}\" even after its opened files have been reverted!" | echo_color ${COLOR_RED}
                 fi
             fi
         fi
@@ -133,8 +135,7 @@ function p4_client_delete() {
 
 function detect_client_deletion_success() {
     local -n ret=$1
-    ret=$(cat - | perl -pe 's,,$1,g') # TODO
-    ret=$(cat - | grep -cE '') # TODO
+    ret=$(cat - | grep -cE 'Client .* deleted\.')
 }
 
 function detect_pending_changes() {
