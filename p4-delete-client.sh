@@ -1,12 +1,13 @@
 #!/bin/bash
 
-VERSION='0.0.2'
+VERSION='0.0.3'
 
 # Execute this script with 'bash -x SCRIPT' to activate debugging
 if [ ${-/*x*/x} == 'x' ]; then
-    PS4='+ $(basename ${BASH_SOURCE[0]}):${LINENO} ${FUNCNAME[0]}() |err=$?| \$ '
+    # PS4='+ $(basename ${BASH_SOURCE[0]}):${LINENO} ${FUNCNAME[0]}() |err=$?| \$ '
+    PS4='+ :${LINENO} ${FUNCNAME[0]}() |err=$?| \$ '
 fi
-set -e  # Fail on first error
+# set -e  # Fail on first error
 
 SELF_NAME="$0"
 if [[ "${MACHTYPE}" =~ "msys" ]]; then
@@ -113,7 +114,7 @@ function _main() {
                 fi
             fi
         fi
-        if [ $detect_opened_files -ge 1 ]; then
+        if [ $has_opened_files -ge 1 ]; then
             echo "The client ${client_name} has opened file(s)" | echo_color ${COLOR_CYAN}
             $OPT_REVERT_OPENED && revert_opened_files are_all_files_reverted "${client_name}"
             if [ ${are_all_files_reverted} ]; then
@@ -145,7 +146,8 @@ function detect_pending_changes() {
 
 function detect_opened_files() {
     local -n ret=$1
-    ret=$(cat - | grep -cF ' - edit change ')
+    # ret=$(cat - | grep -cF ' - edit change ')
+    ret=$(cat - | grep -cF ' has files opened. ')
 }
 
 function p4_list_pending_changelists() {
@@ -155,7 +157,7 @@ function p4_list_pending_changelists() {
 
 function p4_list_changelists_with_opened_files() {
     local client_name=$1
-    p4 opened -C "${client_name}" | tr -d '\r' | perl -pe 's, - edit change ([0-9]+),$1,' | xargs
+    p4 opened -C "${client_name}" | tr -d '\r' | perl -p -e 's,.* - edit change ([0-9]+).*,$1,;' -e 's,.* - edit default change .*,default,;' | sort -u | xargs
 }
 
 function delete_pending_changelists() {
@@ -187,32 +189,42 @@ function revert_opened_files() {
     local client_name=$2
 
     ret=true
-    echo "Let's try to revert opened files" | echo_color ${COLOR_CYAN}
+    echo "Let's try to revert the opened files" | echo_color ${COLOR_CYAN}
 
-    local changelists_w_opened=$(p4_list_changelists_with_opened_files "${client_name}")
+    local changelists_w_opened=( $(p4_list_changelists_with_opened_files "${client_name}") )
     local changelist
     local revert_output=''
 
     for changelist in "${changelists_w_opened[@]}"; do
         revert_output=$(p4_revert_changelist "${client_name}" "${changelist}")
-        detect_changelist_revert_success is_revert <<< "${revert_output}"
-        if [ $is_revert -eq 0 ]; then
-            echo "${revert_output}" | echo_color ${COLOR_YELLOW}
-            ret=false
+        detect_permission_issue is_not_enough_permission <<< "${revert_output}"
+        if [ $is_not_enough_permission -ge 1 ]; then
+            echo "${revert_output}" | echo_color ${COLOR_RED}
         else
-            echo "changelist #${changelist} reverted" | echo_color ${COLOR_GREEN}
+            detect_changelist_revert_success is_revert <<< "${revert_output}"
+            if [ $is_revert -eq 0 ]; then
+                echo "${revert_output}" | echo_color ${COLOR_YELLOW}
+                ret=false
+            else
+                echo "changelist #${changelist} reverted" | echo_color ${COLOR_GREEN}
+            fi
         fi
     done
 }
 
 function detect_changelist_deletion_success() {
     local -n ret=$1
-    ret=$(cat - | grep -cF '' ) # TODO
+    ret=$(cat - | grep -cF '') # TODO
 }
 
 function detect_changelist_revert_success() {
     local -n ret=$1
-    ret=$(cat - | grep -cF '' ) # TODO
+    ret=$(cat - | grep -cF '') # TODO
+}
+
+function detect_permission_issue() {
+    local -n ret=$1
+    ret=$(cat - | grep -cF "You don't have permission for this operation.")
 }
 
 function p4_delete_pending_changelist() {
@@ -238,11 +250,15 @@ function p4_revert_changelist() {
     # P4 Server records that the files as being no longer open, but the file(s)
     # are unchanged in the client workspace.
 
-    # TODO Which revert is needed?
-    # p4 revert -k -C "${client_name}" -c ${changelist} "${depot_path_to_file}" 2>&1
-    p4 revert -k -C "${client_name}" -c ${changelist} ... 2>&1
-    # p4 revert -k -C "${client_name}" ... 2>&1
-    # p4 revert -k -C "${client_name}" "${depot_path_to_added_file}" 2>&1
+    if [ "${changelist}" == "default" ]; then
+        p4 revert -k -C "${client_name}" ... 2>&1
+    else
+        # TODO Which revert is needed?
+        # p4 revert -k -c ${changelist} -C "${client_name}" "${depot_path_to_file}" 2>&1
+        p4 revert -k -c ${changelist} -C "${client_name}" ... 2>&1
+        # p4 revert -k -C "${client_name}" ... 2>&1
+        # p4 revert -k -C "${client_name}" "${depot_path_to_added_file}" 2>&1
+    fi
 }
 
 _main "$@"
