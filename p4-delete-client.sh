@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION='0.0.3'
+VERSION='0.0.4'
 
 # Execute this script with 'bash -x SCRIPT' to activate debugging
 if [ ${-/*x*/x} == 'x' ]; then
@@ -44,16 +44,18 @@ OPTIONS:
     -h, --help          Display this help.
         --delete-force       Use the '-f' (force) p4 option when performing any deletion.
         --delete-pending-cl  If the client has pending changelists, try to delete them.
+        --delete-shelved     If the client has shelved files, try to delete them.
         --revert-opened      If the client has opened files, try to revert them.
 EOF
 }
 
 OPT_DELETE_FORCE=false
 OPT_DELETE_PENDING_CL=false
+OPT_DELETE_SHELVED=false
 OPT_REVERT_OPENED=false
 
 function _main() {
-    args=$(getopt --options hv --longoptions help,version,delete-force,delete-pending-cl,revert-opened --name "${SELF_NAME}" -- "$@")
+    args=$(getopt --options hv --longoptions help,version,delete-force,delete-pending-cl,delete-shelved,revert-opened --name "${SELF_NAME}" -- "$@")
     if [ $? -ne 0 ]; then
         >&2 echo "Error: Invalid options"
         exit 2
@@ -67,6 +69,10 @@ function _main() {
         ;;
         --delete-pending-cl)
             OPT_DELETE_PENDING_CL=true
+            shift
+        ;;
+        --delete-shelved)
+            OPT_DELETE_SHELVED=true
             shift
         ;;
         --revert-opened)
@@ -97,10 +103,14 @@ function _main() {
     local client_name=$1
     local delete_output=$(p4_client_delete "${client_name}")
     detect_client_deletion_success is_deleted <<< "${delete_output}"
+    detect_client_doesnt_exist is_absent <<< "${delete_output}"
     if [ $is_deleted -gt 0 ]; then
         echo "${delete_output}" | echo_color ${COLOR_GREEN}
+    elif [ $is_absent -gt 0 ]; then
+        echo "${delete_output}" | echo_color ${COLOR_YELLOW}
     else
         detect_pending_changes has_pending <<< "${delete_output}"
+        detect_shelved_files has_shelved_files <<< "${delete_output}"
         detect_opened_files has_opened_files <<< "${delete_output}"
         if [ $has_pending -ge 1 ]; then
             echo "The client ${client_name} has pending changelist(s)" | echo_color ${COLOR_CYAN}
@@ -111,6 +121,18 @@ function _main() {
                 detect_client_deletion_success is_deleted <<< "${delete_output}"
                 if [ $is_deleted -eq 0 ]; then
                     echo "Unable to delete the client \"${client_name}\" even after its pending CLs have been deleted!" | echo_color ${COLOR_RED}
+                fi
+            fi
+        fi
+        if [ $has_shelved_files -ge 1 ]; then
+            echo "The client ${client_name} has shelved file(s)" | echo_color ${COLOR_CYAN}
+            $OPT_DELETE_SHELVED && delete_shelved_files are_all_shelved_deleted "${client_name}"
+            if [ ${are_all_shelved_deleted} ]; then
+                # Try again to delete the client
+                delete_output=$(p4_client_delete "${client_name}")
+                detect_client_deletion_success is_deleted <<< "${delete_output}"
+                if [ $is_deleted -eq 0 ]; then
+                    echo "Unable to delete the client \"${client_name}\" even after its shelved files have been deleted!" | echo_color ${COLOR_RED}
                 fi
             fi
         fi
@@ -139,15 +161,24 @@ function detect_client_deletion_success() {
     ret=$(cat - | grep -cE 'Client .* deleted\.')
 }
 
+function detect_client_doesnt_exist() {
+    local -n ret=$1
+    ret=$(cat - | grep -cE 'Client .* doesn'\''t exist\.')
+}
+
 function detect_pending_changes() {
     local -n ret=$1
-    ret=$(cat - | grep -cF ' has pending changes.')
+    ret=$(cat - | grep -cF ' has pending changes')
+}
+
+function detect_shelved_files() {
+    local -n ret=$1
+    ret=$(cat - | grep -cF ' has files shelved')
 }
 
 function detect_opened_files() {
     local -n ret=$1
-    # ret=$(cat - | grep -cF ' - edit change ')
-    ret=$(cat - | grep -cF ' has files opened. ')
+    ret=$(cat - | grep -cF ' has files opened')
 }
 
 function p4_list_pending_changelists() {
@@ -155,9 +186,14 @@ function p4_list_pending_changelists() {
     p4 changes -c "${client_name}" -s pending | tr -d '\r' | awk -F' ' '{print $2}' | xargs
 }
 
+function p4_list_changelists_with_shelved_files() {
+    local client_name=$1
+    p4 changes -c "${client_name}" -s shelved | tr -d '\r' | awk -F' ' '{print $2}' | xargs
+}
+
 function p4_list_changelists_with_opened_files() {
     local client_name=$1
-    p4 opened -C "${client_name}" | tr -d '\r' | perl -p -e 's,.* - edit change ([0-9]+).*,$1,;' -e 's,.* - edit default change .*,default,;' | sort -u | xargs
+    p4 opened -C "${client_name}" | tr -d '\r' | perl -p -e 's,.* - (add|edit) change ([0-9]+).*,$2,;' -e 's,.* - edit default change .*,default,;' | sort -u | xargs
 }
 
 function delete_pending_changelists() {
@@ -180,6 +216,30 @@ function delete_pending_changelists() {
             ret=false
         else
             echo "changelist #${changelist} deleted" | echo_color ${COLOR_GREEN}
+        fi
+    done
+}
+
+function delete_shelved_files() {
+    local -n ret=$1
+    local client_name=$2
+
+    ret=true
+    echo "Let's try to delete the shelved files" | echo_color ${COLOR_CYAN}
+
+    local changelists_w_shevled=( $(p4_list_changelists_with_shelved_files "${client_name}") )
+    local changelist
+    local delete_output=''
+
+    for changelist in "${changelists_w_shevled[@]}"; do
+        delete_output=$(p4_delete_shelved "${client_name}" "${changelist}")
+        detect_shelved_deletion_success is_deleted <<< "${delete_output}"
+        if [ $is_deleted -eq 0 ]; then
+            # Display the CL deletion output so the user know what is the issue.
+            echo "${delete_output}" | echo_color ${COLOR_YELLOW}
+            ret=false
+        else
+            echo "Shelved files deleted in the changelist #${changelist}" | echo_color ${COLOR_GREEN}
         fi
     done
 }
@@ -214,7 +274,12 @@ function revert_opened_files() {
 
 function detect_changelist_deletion_success() {
     local -n ret=$1
-    ret=$(cat - | grep -cF '') # TODO
+    ret=$(cat - | grep -cE '^Change [0-9]+ deleted\.')
+}
+
+function detect_shelved_deletion_success() {
+    local -n ret=$1
+    ret=$(cat - | grep -cE '^Shelved change [0-9]+ deleted\.')
 }
 
 function detect_changelist_revert_success() {
@@ -235,6 +300,16 @@ function p4_delete_pending_changelist() {
     $OPT_DELETE_FORCE && force='-f'
 
     p4 -c "${client_name}" change -d ${force} ${changelist} 2>&1
+}
+
+function p4_delete_shelved() {
+    local client_name=$1
+    local changelist=$2
+
+    local force=''
+    $OPT_DELETE_FORCE && force='-f'
+
+    p4 -c "${client_name}" shelve -d ${force} -c ${changelist} 2>&1
 }
 
 # TODO It may be needed to give the depot-path of the file to revert
